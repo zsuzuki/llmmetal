@@ -33,3 +33,5 @@ cmake --build --preset default
 文字列描画は内部で LRU キャッシュされ、同じ内容の再描画では再ラスタライズを避けます。キャッシュは固定上限で古い項目から破棄します。
 
 3D の簡易ライティングは `Renderer::set_light_direction()`, `Renderer::set_ambient_light()`, `Renderer::set_specular_strength()`, `Renderer::set_shininess()` で調整できます。specular を使う場合は `Renderer::set_camera_position()` も設定してください。
+
+Cube と Cylinder は回転付きオーバーロードもあり、`Vec3 rotation_radians` でローカル回転を指定できます。

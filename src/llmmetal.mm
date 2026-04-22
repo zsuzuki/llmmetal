@@ -177,6 +177,10 @@ Vec3 operator*(Vec3 a, float s) {
   return {a.x * s, a.y * s, a.z * s};
 }
 
+Vec3 operator+(Vec3 a, Vec3 b) {
+  return {a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
 float dot(Vec3 a, Vec3 b) {
   return a.x * b.x + a.y * b.y + a.z * b.z;
 }
@@ -226,6 +230,32 @@ Color modulate_color(Color color, float factor) {
       std::clamp(color.b * factor, 0.0f, 1.0f),
       color.a,
   };
+}
+
+Vec3 rotate_x(Vec3 v, float radians) {
+  const float c = std::cos(radians);
+  const float s = std::sin(radians);
+  return {v.x, v.y * c - v.z * s, v.y * s + v.z * c};
+}
+
+Vec3 rotate_y(Vec3 v, float radians) {
+  const float c = std::cos(radians);
+  const float s = std::sin(radians);
+  return {v.x * c + v.z * s, v.y, -v.x * s + v.z * c};
+}
+
+Vec3 rotate_z(Vec3 v, float radians) {
+  const float c = std::cos(radians);
+  const float s = std::sin(radians);
+  return {v.x * c - v.y * s, v.x * s + v.y * c, v.z};
+}
+
+Vec3 rotate_xyz(Vec3 v, Vec3 rotation) {
+  return rotate_z(rotate_y(rotate_x(v, rotation.x), rotation.y), rotation.z);
+}
+
+Vec3 transform_local_point(Vec3 center, Vec3 local, Vec3 rotation) {
+  return center + rotate_xyz(local, rotation);
 }
 
 void append_triangle(std::vector<GpuVertex>& vertices, Vec3 a, Vec3 b, Vec3 c, Color color, Vec2 uv0, Vec2 uv1, Vec2 uv2) {
@@ -1202,19 +1232,23 @@ void Renderer::draw_plane_3d(Vec3 center, Vec2 size, Color color, TextureHandle 
 }
 
 void Renderer::draw_cube_3d(Vec3 center, Vec3 size, Color color, TextureHandle texture) {
+  draw_cube_3d(center, size, {0.0f, 0.0f, 0.0f}, color, texture);
+}
+
+void Renderer::draw_cube_3d(Vec3 center, Vec3 size, Vec3 rotation_radians, Color color, TextureHandle texture) {
   auto* backend = static_cast<Backend*>(impl_);
   const float hx = size.x * 0.5f;
   const float hy = size.y * 0.5f;
   const float hz = size.z * 0.5f;
 
-  const Vec3 p000 {center.x - hx, center.y - hy, center.z - hz};
-  const Vec3 p001 {center.x - hx, center.y - hy, center.z + hz};
-  const Vec3 p010 {center.x - hx, center.y + hy, center.z - hz};
-  const Vec3 p011 {center.x - hx, center.y + hy, center.z + hz};
-  const Vec3 p100 {center.x + hx, center.y - hy, center.z - hz};
-  const Vec3 p101 {center.x + hx, center.y - hy, center.z + hz};
-  const Vec3 p110 {center.x + hx, center.y + hy, center.z - hz};
-  const Vec3 p111 {center.x + hx, center.y + hy, center.z + hz};
+  const Vec3 p000 = transform_local_point(center, {-hx, -hy, -hz}, rotation_radians);
+  const Vec3 p001 = transform_local_point(center, {-hx, -hy,  hz}, rotation_radians);
+  const Vec3 p010 = transform_local_point(center, {-hx,  hy, -hz}, rotation_radians);
+  const Vec3 p011 = transform_local_point(center, {-hx,  hy,  hz}, rotation_radians);
+  const Vec3 p100 = transform_local_point(center, { hx, -hy, -hz}, rotation_radians);
+  const Vec3 p101 = transform_local_point(center, { hx, -hy,  hz}, rotation_radians);
+  const Vec3 p110 = transform_local_point(center, { hx,  hy, -hz}, rotation_radians);
+  const Vec3 p111 = transform_local_point(center, { hx,  hy,  hz}, rotation_radians);
 
   std::vector<GpuVertex> vertices;
   vertices.reserve(36);
@@ -1229,14 +1263,18 @@ void Renderer::draw_cube_3d(Vec3 center, Vec3 size, Color color, TextureHandle t
 }
 
 void Renderer::draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Color color, TextureHandle texture) {
+  draw_cylinder_3d(center, radius, height, segments, {0.0f, 0.0f, 0.0f}, color, texture);
+}
+
+void Renderer::draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Vec3 rotation_radians, Color color, TextureHandle texture) {
   auto* backend = static_cast<Backend*>(impl_);
   if (radius <= 0.0f || height <= 0.0f || segments < 3) {
     return;
   }
 
   const float half_height = height * 0.5f;
-  const Vec3 top_center {center.x, center.y + half_height, center.z};
-  const Vec3 bottom_center {center.x, center.y - half_height, center.z};
+  const Vec3 top_center = transform_local_point(center, {0.0f, half_height, 0.0f}, rotation_radians);
+  const Vec3 bottom_center = transform_local_point(center, {0.0f, -half_height, 0.0f}, rotation_radians);
   std::vector<GpuVertex> vertices;
   vertices.reserve(static_cast<size_t>(segments) * 12);
 
@@ -1246,13 +1284,17 @@ void Renderer::draw_cylinder_3d(Vec3 center, float radius, float height, int seg
     const float a0 = t0 * 2.0f * kPi;
     const float a1 = t1 * 2.0f * kPi;
 
-    const Vec3 b0 {center.x + std::cos(a0) * radius, center.y - half_height, center.z + std::sin(a0) * radius};
-    const Vec3 b1 {center.x + std::cos(a1) * radius, center.y - half_height, center.z + std::sin(a1) * radius};
-    const Vec3 t0p {center.x + std::cos(a0) * radius, center.y + half_height, center.z + std::sin(a0) * radius};
-    const Vec3 t1p {center.x + std::cos(a1) * radius, center.y + half_height, center.z + std::sin(a1) * radius};
+    const Vec3 local_b0 {std::cos(a0) * radius, -half_height, std::sin(a0) * radius};
+    const Vec3 local_b1 {std::cos(a1) * radius, -half_height, std::sin(a1) * radius};
+    const Vec3 local_t0 {std::cos(a0) * radius, half_height, std::sin(a0) * radius};
+    const Vec3 local_t1 {std::cos(a1) * radius, half_height, std::sin(a1) * radius};
+    const Vec3 b0 = transform_local_point(center, local_b0, rotation_radians);
+    const Vec3 b1 = transform_local_point(center, local_b1, rotation_radians);
+    const Vec3 t0p = transform_local_point(center, local_t0, rotation_radians);
+    const Vec3 t1p = transform_local_point(center, local_t1, rotation_radians);
 
-    const Vec3 n0 {std::cos(a0), 0.0f, std::sin(a0)};
-    const Vec3 n1 {std::cos(a1), 0.0f, std::sin(a1)};
+    const Vec3 n0 = normalize(rotate_xyz({std::cos(a0), 0.0f, std::sin(a0)}, rotation_radians));
+    const Vec3 n1 = normalize(rotate_xyz({std::cos(a1), 0.0f, std::sin(a1)}, rotation_radians));
     append_triangle(vertices, b0, b1, t1p, color, {t0, 1.0f}, {t1, 1.0f}, {t1, 0.0f}, n0, n1, n1);
     append_triangle(vertices, b0, t1p, t0p, color, {t0, 1.0f}, {t1, 0.0f}, {t0, 0.0f}, n0, n1, n0);
     append_triangle(vertices, top_center, t0p, t1p, modulate_color(color, 1.08f), {0.5f, 0.5f}, {0.5f + std::cos(a0) * 0.5f, 0.5f - std::sin(a0) * 0.5f}, {0.5f + std::cos(a1) * 0.5f, 0.5f - std::sin(a1) * 0.5f});

@@ -156,7 +156,9 @@ public:
   void draw_line_3d(Vec3 a, Vec3 b, Color color);
   void draw_triangle_3d(const Vertex3D& a, const Vertex3D& b, const Vertex3D& c, TextureHandle texture = {});
   void draw_plane_3d(Vec3 center, Vec2 size, Color color, TextureHandle texture = {});
+  void draw_cube_3d(Vec3 center, Vec3 size, Vec3 rotation_radians, Color color, TextureHandle texture = {});
   void draw_cube_3d(Vec3 center, Vec3 size, Color color, TextureHandle texture = {});
+  void draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Vec3 rotation_radians, Color color, TextureHandle texture = {});
   void draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Color color, TextureHandle texture = {});
   void draw_sphere_3d(Vec3 center, float radius, int slices, int stacks, Color color, TextureHandle texture = {});
   void draw_text_2d(std::string_view text, Vec2 position_pixels, float font_size_pixels, Color color);
