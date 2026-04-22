@@ -134,6 +134,11 @@ public:
 
   void clear(Color color);
   void set_camera(const Mat4& view, const Mat4& projection);
+  void set_camera_position(Vec3 position);
+  void set_light_direction(Vec3 direction);
+  void set_ambient_light(float ambient);
+  void set_specular_strength(float strength);
+  void set_shininess(float shininess);
 
   TextureHandle create_texture_rgba8(int width, int height, const std::uint8_t* rgba8_pixels);
   TextureLoadResult try_create_texture_from_file(const std::filesystem::path& path, const TextureLoadOptions& options);
@@ -151,6 +156,9 @@ public:
   void draw_line_3d(Vec3 a, Vec3 b, Color color);
   void draw_triangle_3d(const Vertex3D& a, const Vertex3D& b, const Vertex3D& c, TextureHandle texture = {});
   void draw_plane_3d(Vec3 center, Vec2 size, Color color, TextureHandle texture = {});
+  void draw_cube_3d(Vec3 center, Vec3 size, Color color, TextureHandle texture = {});
+  void draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Color color, TextureHandle texture = {});
+  void draw_sphere_3d(Vec3 center, float radius, int slices, int stacks, Color color, TextureHandle texture = {});
   void draw_text_2d(std::string_view text, Vec2 position_pixels, float font_size_pixels, Color color);
 
   int drawable_width() const;

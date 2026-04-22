@@ -73,7 +73,9 @@ namespace {
 struct Uniforms {
   float mvp[16];
   float color[4];
-  uint32_t use_texture;
+  float flags[4];
+  float light_dir_ambient[4];
+  float camera_pos_specular[4];
 };
 
 struct GpuVertex {
@@ -86,6 +88,9 @@ struct GpuVertex {
   float ca;
   float u;
   float v;
+  float nx;
+  float ny;
+  float nz;
 };
 
 struct CachedTextTexture {
@@ -104,18 +109,24 @@ struct VertexIn {
   float3 position [[attribute(0)]];
   float4 color [[attribute(1)]];
   float2 uv [[attribute(2)]];
+  float3 normal [[attribute(3)]];
 };
 
 struct Uniforms {
   float4x4 mvp;
   float4 color;
-  uint use_texture;
+  float4 flags;
+  float4 light_dir_ambient;
+  float4 camera_pos_specular;
 };
 
 struct VertexOut {
   float4 position [[position]];
   float4 color;
   float2 uv;
+  float3 world_position;
+  float3 normal;
+  float lighting;
 };
 
 vertex VertexOut vertex_main(VertexIn in [[stage_in]], constant Uniforms& uniforms [[buffer(1)]]) {
@@ -123,6 +134,22 @@ vertex VertexOut vertex_main(VertexIn in [[stage_in]], constant Uniforms& unifor
   out.position = uniforms.mvp * float4(in.position, 1.0);
   out.color = in.color * uniforms.color;
   out.uv = in.uv;
+  out.world_position = in.position;
+  out.normal = in.normal;
+  float lighting = 1.0;
+  if (uniforms.flags.y > 0.5) {
+    const float3 normal = normalize(in.normal);
+    const float3 light_dir = normalize(uniforms.light_dir_ambient.xyz);
+    const float ambient = uniforms.light_dir_ambient.w;
+    const float diffuse = max(dot(normal, -light_dir), 0.0);
+    const float3 view_dir = normalize(uniforms.camera_pos_specular.xyz - in.position);
+    const float3 reflect_dir = reflect(light_dir, normal);
+    const float specular_strength = uniforms.camera_pos_specular.w;
+    const float shininess = max(uniforms.flags.z, 1.0);
+    const float specular = pow(max(dot(view_dir, reflect_dir), 0.0), shininess) * specular_strength;
+    lighting = diffuse * (1.0 - ambient) + ambient + specular;
+  }
+  out.lighting = lighting;
   return out;
 }
 
@@ -132,9 +159,10 @@ fragment float4 fragment_main(
     texture2d<float> color_texture [[texture(0)]]) {
   constexpr sampler linear_sampler(address::clamp_to_edge, filter::linear);
   float4 base = in.color;
-  if (uniforms.use_texture != 0 && color_texture.get_width() > 0) {
+  if (uniforms.flags.x > 0.5 && color_texture.get_width() > 0) {
     base *= color_texture.sample(linear_sampler, in.uv);
   }
+  base.rgb *= min(in.lighting, 2.0);
   return base;
 }
 )";
@@ -184,7 +212,57 @@ float mat_at(const Mat4& m, int col, int row) {
 }
 
 GpuVertex make_vertex(Vec3 pos, Color color, Vec2 uv = {}) {
-  return {pos.x, pos.y, pos.z, color.r, color.g, color.b, color.a, uv.x, uv.y};
+  return {pos.x, pos.y, pos.z, color.r, color.g, color.b, color.a, uv.x, uv.y, 0.0f, 0.0f, 1.0f};
+}
+
+GpuVertex make_vertex(Vec3 pos, Color color, Vec2 uv, Vec3 normal) {
+  return {pos.x, pos.y, pos.z, color.r, color.g, color.b, color.a, uv.x, uv.y, normal.x, normal.y, normal.z};
+}
+
+Color modulate_color(Color color, float factor) {
+  return {
+      std::clamp(color.r * factor, 0.0f, 1.0f),
+      std::clamp(color.g * factor, 0.0f, 1.0f),
+      std::clamp(color.b * factor, 0.0f, 1.0f),
+      color.a,
+  };
+}
+
+void append_triangle(std::vector<GpuVertex>& vertices, Vec3 a, Vec3 b, Vec3 c, Color color, Vec2 uv0, Vec2 uv1, Vec2 uv2) {
+  const Vec3 normal = normalize(cross(b - a, c - a));
+  vertices.push_back(make_vertex(a, color, uv0, normal));
+  vertices.push_back(make_vertex(b, color, uv1, normal));
+  vertices.push_back(make_vertex(c, color, uv2, normal));
+}
+
+void append_triangle(std::vector<GpuVertex>& vertices,
+                     Vec3 a,
+                     Vec3 b,
+                     Vec3 c,
+                     Color color,
+                     Vec2 uv0,
+                     Vec2 uv1,
+                     Vec2 uv2,
+                     Vec3 na,
+                     Vec3 nb,
+                     Vec3 nc) {
+  vertices.push_back(make_vertex(a, color, uv0, na));
+  vertices.push_back(make_vertex(b, color, uv1, nb));
+  vertices.push_back(make_vertex(c, color, uv2, nc));
+}
+
+void append_quad(std::vector<GpuVertex>& vertices,
+                 Vec3 a,
+                 Vec3 b,
+                 Vec3 c,
+                 Vec3 d,
+                 Color color,
+                 Vec2 uv0 = {0.0f, 1.0f},
+                 Vec2 uv1 = {1.0f, 1.0f},
+                 Vec2 uv2 = {1.0f, 0.0f},
+                 Vec2 uv3 = {0.0f, 0.0f}) {
+  append_triangle(vertices, a, b, c, color, uv0, uv1, uv2);
+  append_triangle(vertices, a, c, d, color, uv0, uv2, uv3);
 }
 
 TextureHandle make_handle(uint32_t value) {
@@ -336,6 +414,11 @@ struct Backend {
   std::uint64_t text_cache_clock = 0;
   std::unordered_map<uint32_t, id<MTLTexture>> textures;
   std::unordered_map<std::string, CachedTextTexture> text_cache;
+  Vec3 camera_position {0.0f, 1.5f, 4.0f};
+  Vec3 light_direction = normalize({-0.45f, -1.0f, -0.35f});
+  float ambient_light = 0.35f;
+  float specular_strength = 0.18f;
+  float shininess = 24.0f;
 
   void initialize();
   void begin_frame(MTKView* view);
@@ -348,7 +431,7 @@ struct Backend {
   void evict_oldest_text_cache_entry();
   TextureLoadResult load_texture_from_file(std::string_view path, const TextureLoadOptions& options);
   TextureHandle make_text_texture(std::string_view text, float font_size, Color color, Vec2& size_out);
-  void issue_draw(std::span<const GpuVertex> vertices, MTLPrimitiveType primitive, const Mat4& mvp, Color modulate, TextureHandle texture, bool enable_depth);
+  void issue_draw(std::span<const GpuVertex> vertices, MTLPrimitiveType primitive, const Mat4& mvp, Color modulate, TextureHandle texture, bool enable_depth, bool enable_lighting);
 };
 
 namespace {
@@ -460,6 +543,9 @@ void Backend::initialize() {
   vertex_desc.attributes[2].format = MTLVertexFormatFloat2;
   vertex_desc.attributes[2].offset = offsetof(GpuVertex, u);
   vertex_desc.attributes[2].bufferIndex = 0;
+  vertex_desc.attributes[3].format = MTLVertexFormatFloat3;
+  vertex_desc.attributes[3].offset = offsetof(GpuVertex, nx);
+  vertex_desc.attributes[3].bufferIndex = 0;
   vertex_desc.layouts[0].stride = sizeof(GpuVertex);
   vertex_desc.layouts[0].stepFunction = MTLVertexStepFunctionPerVertex;
 
@@ -792,7 +878,8 @@ void Backend::issue_draw(std::span<const GpuVertex> vertices,
                          const Mat4& mvp,
                          Color modulate,
                          TextureHandle texture,
-                         bool enable_depth) {
+                         bool enable_depth,
+                         bool enable_lighting) {
   if (current_encoder == nil || vertices.empty()) {
     return;
   }
@@ -807,7 +894,18 @@ void Backend::issue_draw(std::span<const GpuVertex> vertices,
   uniforms.color[1] = modulate.g;
   uniforms.color[2] = modulate.b;
   uniforms.color[3] = modulate.a;
-  uniforms.use_texture = texture ? 1u : 0u;
+  uniforms.flags[0] = texture ? 1.0f : 0.0f;
+  uniforms.flags[1] = enable_lighting ? 1.0f : 0.0f;
+  uniforms.flags[2] = shininess;
+  uniforms.flags[3] = 0.0f;
+  uniforms.light_dir_ambient[0] = light_direction.x;
+  uniforms.light_dir_ambient[1] = light_direction.y;
+  uniforms.light_dir_ambient[2] = light_direction.z;
+  uniforms.light_dir_ambient[3] = ambient_light;
+  uniforms.camera_pos_specular[0] = camera_position.x;
+  uniforms.camera_pos_specular[1] = camera_position.y;
+  uniforms.camera_pos_specular[2] = camera_position.z;
+  uniforms.camera_pos_specular[3] = specular_strength;
 
   id<MTLBuffer> uniform_buffer = [device newBufferWithBytes:&uniforms length:sizeof(uniforms) options:MTLResourceStorageModeShared];
   [current_encoder setDepthStencilState:enable_depth ? depth_state : nil];
@@ -942,6 +1040,36 @@ void Renderer::set_camera(const Mat4& view, const Mat4& projection) {
   backend->projection = projection;
 }
 
+void Renderer::set_camera_position(Vec3 position) {
+  auto* backend = static_cast<Backend*>(impl_);
+  backend->camera_position = position;
+}
+
+void Renderer::set_light_direction(Vec3 direction) {
+  auto* backend = static_cast<Backend*>(impl_);
+  const Vec3 normalized = normalize(direction);
+  backend->light_direction = (std::abs(normalized.x) <= 1.0e-6f &&
+                              std::abs(normalized.y) <= 1.0e-6f &&
+                              std::abs(normalized.z) <= 1.0e-6f)
+                                 ? normalize({-0.45f, -1.0f, -0.35f})
+                                 : normalized;
+}
+
+void Renderer::set_ambient_light(float ambient) {
+  auto* backend = static_cast<Backend*>(impl_);
+  backend->ambient_light = std::clamp(ambient, 0.0f, 1.0f);
+}
+
+void Renderer::set_specular_strength(float strength) {
+  auto* backend = static_cast<Backend*>(impl_);
+  backend->specular_strength = std::max(strength, 0.0f);
+}
+
+void Renderer::set_shininess(float shininess) {
+  auto* backend = static_cast<Backend*>(impl_);
+  backend->shininess = std::max(shininess, 1.0f);
+}
+
 TextureHandle Renderer::create_texture_rgba8(int width, int height, const std::uint8_t* rgba8_pixels) {
   auto* backend = static_cast<Backend*>(impl_);
   return backend->create_texture_from_pixels(width, height, rgba8_pixels, {});
@@ -1037,23 +1165,24 @@ void Renderer::draw_line_2d(Vec2 a, Vec2 b, Color color, float thickness) {
                                         0.0f,
                                         -1.0f,
                                         1.0f);
-  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, ortho, {1, 1, 1, 1}, {}, false);
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, ortho, {1, 1, 1, 1}, {}, false, false);
 }
 
 void Renderer::draw_line_3d(Vec3 a, Vec3 b, Color color) {
   auto* backend = static_cast<Backend*>(impl_);
   const std::array<GpuVertex, 2> vertices {make_vertex(a, color), make_vertex(b, color)};
-  backend->issue_draw(vertices, MTLPrimitiveTypeLine, backend->projection * backend->view, {1, 1, 1, 1}, {}, true);
+  backend->issue_draw(vertices, MTLPrimitiveTypeLine, backend->projection * backend->view, {1, 1, 1, 1}, {}, true, false);
 }
 
 void Renderer::draw_triangle_3d(const Vertex3D& a, const Vertex3D& b, const Vertex3D& c, TextureHandle texture) {
   auto* backend = static_cast<Backend*>(impl_);
+  const Vec3 normal = normalize(cross(b.position - a.position, c.position - a.position));
   const std::array<GpuVertex, 3> vertices {
-    make_vertex(a.position, a.color, a.uv),
-    make_vertex(b.position, b.color, b.uv),
-    make_vertex(c.position, c.color, c.uv),
+    make_vertex(a.position, a.color, a.uv, normal),
+    make_vertex(b.position, b.color, b.uv, normal),
+    make_vertex(c.position, c.color, c.uv, normal),
   };
-  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true);
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true, true);
 }
 
 void Renderer::draw_plane_3d(Vec3 center, Vec2 size, Color color, TextureHandle texture) {
@@ -1064,11 +1193,115 @@ void Renderer::draw_plane_3d(Vec3 center, Vec2 size, Color color, TextureHandle 
   const Vec3 p1 {center.x + hx, center.y, center.z - hy};
   const Vec3 p2 {center.x + hx, center.y, center.z + hy};
   const Vec3 p3 {center.x - hx, center.y, center.z + hy};
+  const Vec3 normal {0.0f, 1.0f, 0.0f};
   const std::array<GpuVertex, 6> vertices {
-    make_vertex(p0, color, {0.0f, 1.0f}), make_vertex(p1, color, {1.0f, 1.0f}), make_vertex(p2, color, {1.0f, 0.0f}),
-    make_vertex(p0, color, {0.0f, 1.0f}), make_vertex(p2, color, {1.0f, 0.0f}), make_vertex(p3, color, {0.0f, 0.0f}),
+    make_vertex(p0, color, {0.0f, 1.0f}, normal), make_vertex(p1, color, {1.0f, 1.0f}, normal), make_vertex(p2, color, {1.0f, 0.0f}, normal),
+    make_vertex(p0, color, {0.0f, 1.0f}, normal), make_vertex(p2, color, {1.0f, 0.0f}, normal), make_vertex(p3, color, {0.0f, 0.0f}, normal),
   };
-  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true);
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true, true);
+}
+
+void Renderer::draw_cube_3d(Vec3 center, Vec3 size, Color color, TextureHandle texture) {
+  auto* backend = static_cast<Backend*>(impl_);
+  const float hx = size.x * 0.5f;
+  const float hy = size.y * 0.5f;
+  const float hz = size.z * 0.5f;
+
+  const Vec3 p000 {center.x - hx, center.y - hy, center.z - hz};
+  const Vec3 p001 {center.x - hx, center.y - hy, center.z + hz};
+  const Vec3 p010 {center.x - hx, center.y + hy, center.z - hz};
+  const Vec3 p011 {center.x - hx, center.y + hy, center.z + hz};
+  const Vec3 p100 {center.x + hx, center.y - hy, center.z - hz};
+  const Vec3 p101 {center.x + hx, center.y - hy, center.z + hz};
+  const Vec3 p110 {center.x + hx, center.y + hy, center.z - hz};
+  const Vec3 p111 {center.x + hx, center.y + hy, center.z + hz};
+
+  std::vector<GpuVertex> vertices;
+  vertices.reserve(36);
+  append_quad(vertices, p101, p001, p011, p111, modulate_color(color, 1.02f));
+  append_quad(vertices, p100, p110, p010, p000, modulate_color(color, 0.72f));
+  append_quad(vertices, p000, p010, p011, p001, modulate_color(color, 0.82f));
+  append_quad(vertices, p100, p101, p111, p110, modulate_color(color, 0.94f));
+  append_quad(vertices, p010, p110, p111, p011, modulate_color(color, 1.14f));
+  append_quad(vertices, p100, p000, p001, p101, modulate_color(color, 0.88f));
+
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true, true);
+}
+
+void Renderer::draw_cylinder_3d(Vec3 center, float radius, float height, int segments, Color color, TextureHandle texture) {
+  auto* backend = static_cast<Backend*>(impl_);
+  if (radius <= 0.0f || height <= 0.0f || segments < 3) {
+    return;
+  }
+
+  const float half_height = height * 0.5f;
+  const Vec3 top_center {center.x, center.y + half_height, center.z};
+  const Vec3 bottom_center {center.x, center.y - half_height, center.z};
+  std::vector<GpuVertex> vertices;
+  vertices.reserve(static_cast<size_t>(segments) * 12);
+
+  for (int i = 0; i < segments; ++i) {
+    const float t0 = static_cast<float>(i) / static_cast<float>(segments);
+    const float t1 = static_cast<float>(i + 1) / static_cast<float>(segments);
+    const float a0 = t0 * 2.0f * kPi;
+    const float a1 = t1 * 2.0f * kPi;
+
+    const Vec3 b0 {center.x + std::cos(a0) * radius, center.y - half_height, center.z + std::sin(a0) * radius};
+    const Vec3 b1 {center.x + std::cos(a1) * radius, center.y - half_height, center.z + std::sin(a1) * radius};
+    const Vec3 t0p {center.x + std::cos(a0) * radius, center.y + half_height, center.z + std::sin(a0) * radius};
+    const Vec3 t1p {center.x + std::cos(a1) * radius, center.y + half_height, center.z + std::sin(a1) * radius};
+
+    const Vec3 n0 {std::cos(a0), 0.0f, std::sin(a0)};
+    const Vec3 n1 {std::cos(a1), 0.0f, std::sin(a1)};
+    append_triangle(vertices, b0, b1, t1p, color, {t0, 1.0f}, {t1, 1.0f}, {t1, 0.0f}, n0, n1, n1);
+    append_triangle(vertices, b0, t1p, t0p, color, {t0, 1.0f}, {t1, 0.0f}, {t0, 0.0f}, n0, n1, n0);
+    append_triangle(vertices, top_center, t0p, t1p, modulate_color(color, 1.08f), {0.5f, 0.5f}, {0.5f + std::cos(a0) * 0.5f, 0.5f - std::sin(a0) * 0.5f}, {0.5f + std::cos(a1) * 0.5f, 0.5f - std::sin(a1) * 0.5f});
+    append_triangle(vertices, bottom_center, b1, b0, modulate_color(color, 0.78f), {0.5f, 0.5f}, {0.5f + std::cos(a1) * 0.5f, 0.5f + std::sin(a1) * 0.5f}, {0.5f + std::cos(a0) * 0.5f, 0.5f + std::sin(a0) * 0.5f});
+  }
+
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true, true);
+}
+
+void Renderer::draw_sphere_3d(Vec3 center, float radius, int slices, int stacks, Color color, TextureHandle texture) {
+  auto* backend = static_cast<Backend*>(impl_);
+  if (radius <= 0.0f || slices < 3 || stacks < 2) {
+    return;
+  }
+
+  std::vector<GpuVertex> vertices;
+  vertices.reserve(static_cast<size_t>(slices * stacks) * 6);
+
+  for (int stack = 0; stack < stacks; ++stack) {
+    const float v0 = static_cast<float>(stack) / static_cast<float>(stacks);
+    const float v1 = static_cast<float>(stack + 1) / static_cast<float>(stacks);
+    const float phi0 = (v0 - 0.5f) * kPi;
+    const float phi1 = (v1 - 0.5f) * kPi;
+    const float y0 = std::sin(phi0) * radius;
+    const float y1 = std::sin(phi1) * radius;
+    const float r0 = std::cos(phi0) * radius;
+    const float r1 = std::cos(phi1) * radius;
+
+    for (int slice = 0; slice < slices; ++slice) {
+      const float u0 = static_cast<float>(slice) / static_cast<float>(slices);
+      const float u1 = static_cast<float>(slice + 1) / static_cast<float>(slices);
+      const float theta0 = u0 * 2.0f * kPi;
+      const float theta1 = u1 * 2.0f * kPi;
+
+      const Vec3 p00 {center.x + std::cos(theta0) * r0, center.y + y0, center.z + std::sin(theta0) * r0};
+      const Vec3 p01 {center.x + std::cos(theta1) * r0, center.y + y0, center.z + std::sin(theta1) * r0};
+      const Vec3 p10 {center.x + std::cos(theta0) * r1, center.y + y1, center.z + std::sin(theta0) * r1};
+      const Vec3 p11 {center.x + std::cos(theta1) * r1, center.y + y1, center.z + std::sin(theta1) * r1};
+
+      const Vec3 n00 = normalize({std::cos(theta0) * r0, y0, std::sin(theta0) * r0});
+      const Vec3 n01 = normalize({std::cos(theta1) * r0, y0, std::sin(theta1) * r0});
+      const Vec3 n10 = normalize({std::cos(theta0) * r1, y1, std::sin(theta0) * r1});
+      const Vec3 n11 = normalize({std::cos(theta1) * r1, y1, std::sin(theta1) * r1});
+      append_triangle(vertices, p00, p01, p11, color, {u0, 1.0f - v0}, {u1, 1.0f - v0}, {u1, 1.0f - v1}, n00, n01, n11);
+      append_triangle(vertices, p00, p11, p10, color, {u0, 1.0f - v0}, {u1, 1.0f - v1}, {u0, 1.0f - v1}, n00, n11, n10);
+    }
+  }
+
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, backend->projection * backend->view, {1, 1, 1, 1}, texture, true, true);
 }
 
 void Renderer::draw_text_2d(std::string_view text, Vec2 position_pixels, float font_size_pixels, Color color) {
@@ -1095,7 +1328,7 @@ void Renderer::draw_text_2d(std::string_view text, Vec2 position_pixels, float f
                                         0.0f,
                                         -1.0f,
                                         1.0f);
-  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, ortho, {1, 1, 1, 1}, texture, false);
+  backend->issue_draw(vertices, MTLPrimitiveTypeTriangle, ortho, {1, 1, 1, 1}, texture, false, false);
 }
 
 int Renderer::drawable_width() const {
