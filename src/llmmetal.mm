@@ -509,7 +509,9 @@ namespace {
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
   (void)notification;
+  [_backend->app activateIgnoringOtherApps:YES];
   [_backend->window makeKeyAndOrderFront:nil];
+  [_backend->window orderFrontRegardless];
 }
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {
